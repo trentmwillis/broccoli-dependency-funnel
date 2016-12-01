@@ -28,6 +28,9 @@ export default class BroccoliDependencyFunnel extends Plugin {
       throw new Error('Must specify exactly one of `include` or `exclude`.');
     }
 
+    // We only need 'include', because we know that if we're not including,
+    // we're excluding.
+    this.include = !!options.include;
     this.entry = options.entry;
     this.external = options.external;
 
@@ -37,8 +40,6 @@ export default class BroccoliDependencyFunnel extends Plugin {
     this._depGraphTree = undefined;
     this._nonDepGraph = undefined;
     this._nonDepGraphTree = undefined;
-
-    this.options = options;
   }
 
   build() {
@@ -59,11 +60,9 @@ export default class BroccoliDependencyFunnel extends Plugin {
           return;
         }
 
-        if (this.options.include) {
+        if (this.include) {
           return;
-        }
-
-        if (this.options.exclude) {
+        } else {
           FSTree.applyPatch(inputPath, this.outputPath, nonDepGraphPatch);
           return;
         }
@@ -73,12 +72,14 @@ export default class BroccoliDependencyFunnel extends Plugin {
     var modules = [];
 
     var entryExists = existsSync(path.join(inputPath, this.entry));
-    if (!entryExists && this.options.include) {
-      return;
-    } else if (!entryExists && this.options.exclude) {
-      modules = fs.readdirSync(inputPath);
-      this.copy(modules);
-      return;
+    if (!entryExists) {
+      if (this.include) {
+        return;
+      } else {
+        modules = fs.readdirSync(inputPath);
+        this.copy(modules);
+        return;
+      }
     }
 
     var rollupOptions = {
@@ -119,11 +120,9 @@ export default class BroccoliDependencyFunnel extends Plugin {
 
       rimraf.sync(this.outputPath);
 
-      if (this.options.include) {
+      if (this.include) {
         toCopy = this._depGraph;
-      }
-
-      if (this.options.exclude) {
+      } else {
         toCopy = this._nonDepGraph;
       }
 
