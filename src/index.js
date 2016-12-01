@@ -31,6 +31,7 @@ export default class BroccoliDependencyFunnel extends Plugin {
     // We only need 'include', because we know that if we're not including,
     // we're excluding.
     this.include = !!options.include;
+
     this.entry = options.entry;
     this.external = options.external;
 
@@ -43,99 +44,42 @@ export default class BroccoliDependencyFunnel extends Plugin {
   }
 
   build() {
-      var inputPath = this.inputPaths[0];
+    const inputPath = this.inputPaths[0];
 
     // Check for changes in the files included in the dependency graph
     if (this._depGraph) {
-      var incomingDepGraphTree = this._getFSTree(this._depGraph);
-      var depGraphPatch = this._depGraphTree.calculatePatch(incomingDepGraphTree);
-      var hasDepGraphChanges = depGraphPatch.length !== 0;
+      const incomingDepGraphTree = this._getFSTree(this._depGraph);
+      const depGraphPatch = this._depGraphTree.calculatePatch(incomingDepGraphTree);
+      const hasDepGraphChanges = depGraphPatch.length !== 0;
 
       if (!hasDepGraphChanges) {
-        var incomingNonDepGraphTree = this._getFSTree(this._nonDepGraph);
-        var nonDepGraphPatch = this._nonDepGraphTree.calculatePatch(incomingNonDepGraphTree);
-        var hasNonDepGraphChanges = nonDepGraphPatch.length !== 0;
-
-        if (!hasNonDepGraphChanges) {
-          return;
-        }
-
-        if (this.include) {
-          return;
-        } else {
-          FSTree.applyPatch(inputPath, this.outputPath, nonDepGraphPatch);
-          return;
-        }
+        return this._buildNonDepGraphChanges();
       }
     }
 
-    var modules = [];
-
-    var entryExists = existsSync(path.join(inputPath, this.entry));
+    const entryExists = existsSync(path.join(inputPath, this.entry));
     if (!entryExists) {
-      if (this.include) {
-        return;
-      } else {
-        modules = fs.readdirSync(inputPath);
-        this.copy(modules);
-        return;
+      if (!this.include) {
+        const modules = fs.readdirSync(inputPath);
+        this._copy(modules);
       }
-    }
-
-    var rollupOptions = {
-      entry: this.entry,
-      external: this.external || [],
-      dest: 'foo.js',
-      plugins: [
-        {
-          resolveId: function(importee, importer) {
-            var moduleName;
-
-            // This will only ever be the entry point.
-            if (!importer) {
-              moduleName = importee.replace(inputPath, '');
-              modules.push(moduleName);
-              return path.join(inputPath, importee);
-            }
-
-            // Link in the global paths.
-            moduleName = amdNameResolver(importee, importer).replace(inputPath, '').replace(/^\//, '');
-            var modulePath = path.join(inputPath, moduleName + '.js');
-            if (existsSync(modulePath)) {
-              modules.push(moduleName + '.js');
-              return modulePath;
-            }
-          }
-        }
-      ]
-    };
-
-    return rollup(rollupOptions).then(function() {
-      var toCopy;
-
-      this._depGraph = modules.sort();
-      this._nonDepGraph = filterDirectory(inputPath, '', function(module) {
-        return modules.indexOf(module) === -1;
-      }).sort();
-
-      rimraf.sync(this.outputPath);
-
-      if (this.include) {
-        toCopy = this._depGraph;
-      } else {
-        toCopy = this._nonDepGraph;
-      }
-
-      this.copy(toCopy);
-
-      this._depGraphTree = this._getFSTree(this._depGraph);
-      this._nonDepGraphTree = this._getFSTree(this._nonDepGraph);
 
       return;
-    }.bind(this));
+    }
+
+    const modules = [];
+    const rollupOptions = this._getRollupOptions(modules);
+    return rollup(rollupOptions).then(() => this._copyDepGraph(modules));
   }
 
-  copy(inodes) {
+  /**
+   * Copies a series of files or directories forward.
+   *
+   * @private
+   * @param {Array<String>}
+   * @return {Void}
+   */
+  _copy(inodes) {
     const inputPath = this.inputPaths[0];
     const outputPath = this.outputPath;
 
@@ -146,16 +90,38 @@ export default class BroccoliDependencyFunnel extends Plugin {
   }
 
   /**
+   * Builds changes not in the dependency graph by calculating a patch and
+   * applying it. Only does work when in 'exclude' mode.
+   *
+   * @private
+   * @return {Void}
+   */
+  _buildNonDepGraphChanges() {
+    const incomingNonDepGraphTree = this._getFSTree(this._nonDepGraph);
+    const nonDepGraphPatch = this._nonDepGraphTree.calculatePatch(incomingNonDepGraphTree);
+    const hasNonDepGraphChanges = nonDepGraphPatch.length !== 0;
+
+    if (!hasNonDepGraphChanges) {
+      return;
+    }
+
+    // Copy forward changes not in the dependency graph when using exclude
+    if (!this.include) {
+      FSTree.applyPatch(this.inputPaths[0], this.outputPath, nonDepGraphPatch);
+    }
+  }
+
+  /**
    * Constructs an FSTree from the passed in paths.
    *
    * @param {Array<String>} paths
    * @return {FSTree}
    */
   _getFSTree(paths) {
-    var inputPath = this.inputPaths[0];
-    var entries = paths.map(function(entryPath) {
-      var absolutePath = path.join(inputPath, entryPath);
-      var stat = existsStat(absolutePath);
+    const inputPath = this.inputPaths[0];
+    const entries = paths.map(function(entryPath) {
+      const absolutePath = path.join(inputPath, entryPath);
+      const stat = existsStat(absolutePath);
 
       if (!stat) {
         return;
@@ -165,5 +131,65 @@ export default class BroccoliDependencyFunnel extends Plugin {
     }).filter(Boolean);
 
     return FSTree.fromEntries(entries);
+  }
+
+  /**
+   * Copies modules forward as part of the dependency graph if using 'include'
+   * or copies all other modules in the input if using 'exclude'.
+   *
+   * @private
+   * @param {Array<String>} modules
+   * @return {Void}
+   */
+  _copyDepGraph(modules) {
+    const inputPath = this.inputPaths[0];
+
+    this._depGraph = modules.sort();
+    this._nonDepGraph = filterDirectory(inputPath, '', (module) => modules.indexOf(module) === -1).sort();
+
+    rimraf.sync(this.outputPath);
+
+    const toCopy = this.include ? this._depGraph : this._nonDepGraph;
+    this._copy(toCopy);
+
+    this._depGraphTree = this._getFSTree(this._depGraph);
+    this._nonDepGraphTree = this._getFSTree(this._nonDepGraph);
+  }
+
+  /**
+   * Constructs an options hash to be used with Rollup. It accepts a reference
+   * to an array to collect a list of modules walked in the dependency graph.
+   *
+   * @private
+   * @param {Array<String>} modules
+   * @return {Object}
+   */
+  _getRollupOptions(modules) {
+    const inputPath = this.inputPaths[0];
+    return {
+      entry: this.entry,
+      external: this.external || [],
+      dest: 'foo.js',
+      plugins: [
+        {
+          resolveId(importee, importer) {
+            // This will only ever be the entry point.
+            if (!importer) {
+              const moduleName = importee.replace(inputPath, '');
+              modules.push(moduleName);
+              return path.join(inputPath, importee);
+            }
+
+            // Link in the global paths.
+            const moduleName = amdNameResolver(importee, importer).replace(inputPath, '').replace(/^\//, '');
+            const modulePath = path.join(inputPath, moduleName + '.js');
+            if (existsSync(modulePath)) {
+              modules.push(moduleName + '.js');
+              return modulePath;
+            }
+          }
+        }
+      ]
+    };
   }
 }
